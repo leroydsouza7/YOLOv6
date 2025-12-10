@@ -90,7 +90,9 @@ class Inferer:
                 rel_path = osp.relpath(osp.dirname(img_path), osp.dirname(self.source))
                 save_path = osp.join(save_dir, rel_path, osp.basename(img_path))  # im.jpg
                 txt_path = osp.join(save_dir, rel_path, 'labels', osp.splitext(osp.basename(img_path))[0])
+                # ensure both the save dir and the labels dir exist
                 os.makedirs(osp.join(save_dir, rel_path), exist_ok=True)
+                os.makedirs(osp.join(save_dir, rel_path, 'labels'), exist_ok=True)
 
             gn = torch.tensor(img_src.shape)[[1, 0, 1, 0]]  # normalization gain whwh
             img_ori = img_src.copy()
@@ -101,12 +103,19 @@ class Inferer:
 
             if len(det):
                 det[:, :4] = self.rescale(img.shape[2:], det[:, :4], img_src.shape).round()
+                # Write detections to file (overwrite existing file for this image)
+                if save_txt:
+                    # ensure labels dir exists (redundant but safe)
+                    os.makedirs(osp.dirname(txt_path + '.txt'), exist_ok=True)
+                    lines = []
+                else:
+                    lines = None
+
                 for *xyxy, conf, cls in reversed(det):
-                    if save_txt:  # Write to file
+                    if save_txt and lines is not None:  # prepare line for writing
                         xywh = (self.box_convert(torch.tensor(xyxy).view(1, 4)) / gn).view(-1).tolist()  # normalized xywh
                         line = (cls, *xywh, conf)
-                        with open(txt_path + '.txt', 'a') as f:
-                            f.write(('%g ' * len(line)).rstrip() % line + '\n')
+                        lines.append(('%g ' * len(line)).rstrip() % line)
 
                     if save_img:
                         class_num = int(cls)  # integer class
@@ -114,7 +123,26 @@ class Inferer:
 
                         self.plot_box_and_label(img_ori, max(round(sum(img_ori.shape) / 2 * 0.003), 2), xyxy, label, color=self.generate_colors(class_num, True))
 
+                if lines is not None:
+                    # deduplicate while preserving order
+                    seen = set()
+                    unique_lines = []
+                    for l in lines:
+                        if l not in seen:
+                            unique_lines.append(l)
+                            seen.add(l)
+                    with open(txt_path + '.txt', 'w') as f_txt:
+                        for l in unique_lines:
+                            f_txt.write(l + '\n')
+
                 img_src = np.asarray(img_ori)
+            else:
+                # No detections: remove stale label file if exists
+                if save_txt and osp.exists(txt_path + '.txt'):
+                    try:
+                        os.remove(txt_path + '.txt')
+                    except Exception:
+                        pass
 
             # FPS counter
             fps_calculator.update(1.0 / (t2 - t1))
